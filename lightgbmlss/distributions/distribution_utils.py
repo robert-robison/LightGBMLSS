@@ -451,11 +451,11 @@ class DistributionClass:
         if self.univariate:
             dist_params_list = [
                 response_fun(
-                    predt[:, i].reshape(-1, 1) + init_score_pred[:, i].reshape(-1, 1)).numpy()
+                    predt[:, i].reshape(-1, 1) + init_score_pred[:, i].reshape(-1, 1))
                 for i, (dist_param, response_fun) in enumerate(self.param_dict.items())
             ]
-            dist_params_predt = np.concatenate(dist_params_list, axis=1)
-            dist_params_predt = pd.DataFrame(dist_params_list)
+            dist_params_predt = np.concatenate([arr.numpy() for arr in dist_params_list], axis=1)
+            dist_params_predt = pd.DataFrame(dist_params_predt)
             dist_params_predt.columns = self.param_dict.keys()
         else:
             # Extract distribution arguments, which can be multiple parameters
