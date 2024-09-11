@@ -1,5 +1,10 @@
+from typing import Callable, Union
 import torch
 from torch.nn.functional import softplus, gumbel_softmax, softmax
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
+
 
 def nan_to_num(predt: torch.tensor) -> torch.tensor:
     """
@@ -218,3 +223,86 @@ def gumbel_softmax_fn(predt: torch.tensor,
 
 
     return predt
+
+
+def reshape_scale_tril(predt: torch.tensor, response_fn: Callable = exp_fn) -> torch.tensor:
+    """
+    Reshape the scale_tril parameter to be a valid lower triangular matrix.
+
+    Arguments
+    ---------
+    predt: torch.tensor
+        Predicted values.
+    response_fn: Callable
+        Response function used to ensure predt is strictly positive.
+
+    Returns
+    -------
+    predt: torch.tensor
+        Predicted values.
+    """
+    n, m = predt.shape
+
+    # Calculate the number of dimensions
+    n_dim = int((-1 + np.sqrt(1 + 8 * m)) / 2)
+    
+    # Initialize the final tensor
+    final_tensor = torch.zeros(n, n_dim, n_dim, dtype=predt.dtype)
+
+    # Create indices for the lower triangle including diagonal
+    tril_indices = torch.tril_indices(row=n_dim, col=n_dim, offset=0)
+
+    # Use advanced indexing to fill the lower triangle and diagonal in one operation
+    final_tensor[:, tril_indices[0], tril_indices[1]] = predt
+
+    # Create diagonal indices
+    diag_indices = torch.arange(n_dim)
+
+    # Use these indices to access or modify the diagonals of all five 3x3 matrices
+    final_tensor[:, diag_indices, diag_indices] = response_fn(final_tensor[:, diag_indices, diag_indices])
+
+    return final_tensor
+
+
+def create_mv_dataset(data: Union[pd.DataFrame, np.ndarray],
+                      labels: Union[pd.DataFrame, np.ndarray]
+                      ) -> lgb.Dataset:
+    """
+    Creates a lightgbm Dataset object for multivariate data.
+
+    Arguments
+    ---------
+    data: pandas.DataFrame or numpy.ndarray
+        Input dataset with shape (N, M)
+    labels: pandas.DataFrame or numpy.ndarray
+        Test labels with shape (N, D)
+
+    Returns
+    -------
+    dataset: lightgbm.Dataset
+        LightGBM Dataset object
+    """
+
+    # Convert to numpy arrays if they're pandas DataFrames
+    column_names = None
+    if isinstance(data, pd.DataFrame):
+        column_names = data.columns.tolist()
+        data = data.values
+
+    if isinstance(labels, pd.DataFrame):
+        labels = labels.values
+
+    # Ravel the labels
+    labels_raveled = labels.ravel(order="F")
+
+    # Get the number of label columns
+    D = labels.shape[1]
+
+    # Repeat the data D times
+    data_repeated = np.tile(data, (D, 1))
+
+    # Create and return the lightgbm Dataset
+    data_params = {"data": data_repeated, "label": labels_raveled}
+    if column_names:
+        data_params["feature_name"] = column_names
+    return lgb.Dataset(**data_params)

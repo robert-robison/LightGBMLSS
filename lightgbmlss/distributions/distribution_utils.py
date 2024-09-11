@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Callable, Dict, Optional, List, Tuple
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
@@ -42,6 +42,10 @@ class DistributionClass:
         List of expectiles. Only used for Expectile distributon.
     penalize_crossing: bool
         Whether to include a penalty term to discourage crossing of expectiles. Only used for Expectile distribution.
+    param_dims: Dict[str, int]
+        Dictionary that maps distributional parameters to their dimensions.
+    n_dim: int
+        Number of dimensions of the distribution.
     """
     def __init__(self,
                  distribution: torch.distributions.Distribution = None,
@@ -54,6 +58,8 @@ class DistributionClass:
                  loss_fn: str = "nll",
                  tau: Optional[List[torch.Tensor]] = None,
                  penalize_crossing: bool = False,
+                 param_dims: Dict[str, int] = None,
+                 n_dim: int = 1,
                  ):
 
         self.distribution = distribution
@@ -66,6 +72,8 @@ class DistributionClass:
         self.loss_fn = loss_fn
         self.tau = tau
         self.penalize_crossing = penalize_crossing
+        self.param_dims = param_dims
+        self.n_dim = n_dim
 
     def objective_fn(self, predt: np.ndarray, data: lgb.Dataset) -> Tuple[np.ndarray, np.ndarray]:
 
@@ -96,12 +104,21 @@ class DistributionClass:
         else:
             weights = data.get_weight().reshape(-1, 1)
 
+        # Reduce weights length if not univariate
+        if not self.univariate:
+            weights = weights[:weights.shape[0] // self.n_dim]
+
         # Start values (needed to replace NaNs in predt)
-        start_values = data.get_init_score().reshape(-1, self.n_dist_param)[0, :].tolist()
+        start_values = data.get_init_score().reshape(-1, self.n_dist_param, order="F")[0, :].tolist()
 
         # Calculate gradients and hessians
         predt, loss = self.get_params_loss(predt, target, start_values, requires_grad=True)
         grad, hess = self.compute_gradients_and_hessians(loss, predt, weights)
+
+        # Duplicate gradients and hessians if not univariate
+        if not self.univariate:
+            grad = np.tile(grad, self.n_dim)
+            hess = np.tile(hess, self.n_dim)
 
         return grad, hess
 
@@ -158,17 +175,40 @@ class DistributionClass:
             Loss value.
         """
         # Transform parameters to response scale
-        params = [
-            response_fn(params[i].reshape(-1, 1)) for i, response_fn in enumerate(self.param_dict.values())
-        ]
+        if self.univariate:
+            params = [
+                response_fn(params[i].reshape(-1, 1)) for i, response_fn in enumerate(self.param_dict.values())
+            ]
+        else:
+            param_list = []
+            idx = 0
+            # Ensure params is a 2-D tensor
+            if isinstance(params, list):
+                params = torch.stack(params)
+            if len(params.shape) == 1:
+                params = params.reshape(1, -1)
+            
+            # Extract distribution arguments, which can be multiple parameters
+            for param in self.param_dict:
+                n_dim = self.param_dims[param]
+                param_list.append(self.param_dict[param](params[:, idx:idx + n_dim]))
+                idx += n_dim
+            params = param_list
 
-        # Replace NaNs and infinity values with 0.5
-        nan_inf_idx = torch.isnan(torch.stack(params)) | torch.isinf(torch.stack(params))
-        params = torch.where(nan_inf_idx, torch.tensor(0.5), torch.stack(params))
+        if self.univariate:
+            # Replace NaNs and infinity values with 0.5
+            nan_inf_idx = torch.isnan(torch.stack(params)) | torch.isinf(torch.stack(params))
+            params = torch.where(nan_inf_idx, torch.tensor(0.5), torch.stack(params))
+        else:
+            # Replace NaNs and infinity values with 0.5 for each parameter
+            for i in range(len(params)):
+                nan_inf_idx = torch.isnan(params[i]) | torch.isinf(params[i])
+                params[i] = torch.where(nan_inf_idx, torch.tensor(0.5, device=params[i].device, dtype=params[i].dtype), params[i])
 
         # Specify Distribution and Loss
         if self.tau is None:
-            dist = self.distribution(*params)
+            dist_kwargs = dict(zip(self.distribution_arg_names, params))
+            dist = self.distribution(**dist_kwargs)
             loss = -torch.nansum(dist.log_prob(target))
         else:
             dist = self.distribution(params, self.penalize_crossing)
@@ -198,7 +238,7 @@ class DistributionClass:
             Starting values for each distributional parameter.
         """
         # Convert target to torch.tensor
-        target = torch.tensor(target).reshape(-1, 1)
+        target = torch.tensor(target.reshape(-1, self.n_dim, order="F"))
 
         # Initialize parameters
         params = [torch.tensor(0.5, requires_grad=True) for _ in range(self.n_dist_param)]
@@ -263,21 +303,36 @@ class DistributionClass:
         """
         # Predicted Parameters
         predt = predt.reshape(-1, self.n_dist_param, order="F")
-
+        
         # Replace NaNs and infinity values with unconditional start values
         nan_inf_mask = np.isnan(predt) | np.isinf(predt)
         predt[nan_inf_mask] = np.take(start_values, np.where(nan_inf_mask)[1])
 
-        # Convert to torch.tensor
-        predt = [
-            torch.tensor(predt[:, i].reshape(-1, 1), requires_grad=requires_grad) for i in range(self.n_dist_param)
-        ]
+        if self.univariate:
+            # Convert to torch.tensor
+            predt = [
+                torch.tensor(predt[:, i].reshape(-1, 1), requires_grad=requires_grad) for i in range(self.n_dist_param)
+            ]
+        else:
+            # predt is duplicated n_dim times
+            predt = predt[:predt.shape[0] // self.n_dim]
+
+            # Convert to torch.tensors
+            predt_list = []
+            idx = 0
+            for n_dim in self.param_dims.values():
+                predt_list.append(torch.tensor(predt[:, idx:idx + n_dim], requires_grad=requires_grad))
+                idx += n_dim
+            predt = predt_list
+
+            # Reshape target
+            target = target.reshape(self.n_dim, -1).T
 
         # Predicted Parameters transformed to response scale
         predt_transformed = [
-            response_fn(predt[i].reshape(-1, 1)) for i, response_fn in enumerate(self.param_dict.values())
+            response_fn(predt[i]) for i, response_fn in enumerate(self.param_dict.values())
         ]
-
+        
         # Specify Distribution and Loss
         if self.tau is None:
             dist_kwargs = dict(zip(self.distribution_arg_names, predt_transformed))
@@ -297,7 +352,7 @@ class DistributionClass:
         return predt, loss
 
     def draw_samples(self,
-                     predt_params: pd.DataFrame,
+                     predt_params: List,
                      n_samples: int = 1000,
                      seed: int = 123
                      ) -> pd.DataFrame:
@@ -306,8 +361,8 @@ class DistributionClass:
 
         Arguments
         ---------
-        predt_params: pd.DataFrame
-            pd.DataFrame with predicted distributional parameters.
+        predt_params: List
+            List with predicted distributional parameters.
         n_samples: int
             Number of sample to draw from predicted response distribution.
         seed: int
@@ -322,12 +377,17 @@ class DistributionClass:
         torch.manual_seed(seed)
 
         if self.tau is None:
-            pred_params = torch.tensor(predt_params.values)
-            dist_kwargs = {arg_name: param for arg_name, param in zip(self.distribution_arg_names, pred_params.T)}
+            dist_kwargs = {arg_name: param for arg_name, param in zip(self.distribution_arg_names, predt_params)}
             dist_pred = self.distribution(**dist_kwargs)
             dist_samples = dist_pred.sample((n_samples,)).squeeze().detach().numpy().T
-            dist_samples = pd.DataFrame(dist_samples)
-            dist_samples.columns = [str("y_sample") + str(i) for i in range(dist_samples.shape[1])]
+            if self.univariate:
+                dist_samples = pd.DataFrame(dist_samples)
+                dist_samples.columns = [str("y_sample") + str(i) for i in range(dist_samples.shape[1])]
+            else:
+                dist_samples = dist_samples.reshape(-1, n_samples)
+                dist_samples = pd.DataFrame(dist_samples)
+                dist_samples.columns = [str("y_sample") + str(i) for i in range(dist_samples.shape[1])]
+                dist_samples["dim_num"] = np.repeat(np.arange(self.n_dim), len(dist_samples) // self.n_dim)
         else:
             dist_samples = None
 
@@ -388,19 +448,33 @@ class DistributionClass:
 
         # The predictions don't include the init_score specified in creating the train data.
         # Hence, it needs to be added manually with the corresponding transform for each distributional parameter.
-        dist_params_predt = np.concatenate(
-            [
+        if self.univariate:
+            dist_params_list = [
                 response_fun(
                     predt[:, i].reshape(-1, 1) + init_score_pred[:, i].reshape(-1, 1)).numpy()
                 for i, (dist_param, response_fun) in enumerate(self.param_dict.items())
-            ],
-            axis=1,
-        )
-        dist_params_predt = pd.DataFrame(dist_params_predt)
-        dist_params_predt.columns = self.param_dict.keys()
+            ]
+            dist_params_predt = np.concatenate(dist_params_list, axis=1)
+            dist_params_predt = pd.DataFrame(dist_params_list)
+            dist_params_predt.columns = self.param_dict.keys()
+        else:
+            # Extract distribution arguments, which can be multiple parameters
+            dist_params_list = []
+            idx = 0
+            for param in self.param_dict:
+                n_dim = self.param_dims[param]
+                curr_predt = predt[:, idx:idx + n_dim] + init_score_pred[:, idx:idx + n_dim]
+                dist_params_list.append(self.param_dict[param](curr_predt))
+                idx += n_dim
+            dist_params_predt = np.concatenate([arr.reshape(arr.shape[0], -1) for arr in dist_params_list], axis=1)
+            dist_params_predt = pd.DataFrame(dist_params_predt)
+            columns = []
+            for i, param in enumerate(self.param_dict):
+                columns.extend([f"{param}_{j}" for j in range(np.prod(dist_params_list[i].shape[1:]))])
+            dist_params_predt.columns = columns
 
         # Draw samples from predicted response distribution
-        pred_samples_df = self.draw_samples(predt_params=dist_params_predt,
+        pred_samples_df = self.draw_samples(predt_params=dist_params_list,
                                             n_samples=n_samples,
                                             seed=seed)
 
@@ -415,10 +489,13 @@ class DistributionClass:
 
         elif pred_type == "quantiles":
             # Calculate quantiles from predicted response distribution
-            pred_quant_df = pred_samples_df.quantile(quantiles, axis=1).T
+            sample_cols = [col for col in pred_samples_df if col.startswith("y_sample")]
+            other_cols = [col for col in pred_samples_df if col not in sample_cols]
+            pred_quant_df = pred_samples_df[sample_cols].quantile(quantiles, axis=1).T
             pred_quant_df.columns = [str("quant_") + str(quantiles[i]) for i in range(len(quantiles))]
             if self.discrete:
                 pred_quant_df = pred_quant_df.astype(int)
+            pred_quant_df = pd.concat([pred_samples_df[other_cols], pred_quant_df], axis=1)
             return pred_quant_df
 
     def compute_gradients_and_hessians(self,
@@ -650,7 +727,7 @@ class DistributionClass:
                     )
                 dist_list.append(fit_df)
                 pbar.update(1)
-            pbar.set_description(f"Fitting of candidate distributions completed")
+            pbar.set_description("Fitting of candidate distributions completed")
             fit_df = pd.concat(dist_list).sort_values(by=self.loss_fn, ascending=True)
             fit_df["rank"] = fit_df[self.loss_fn].rank().astype(int)
             fit_df.set_index(fit_df["rank"], inplace=True)
