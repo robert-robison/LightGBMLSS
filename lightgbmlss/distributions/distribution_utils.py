@@ -303,42 +303,55 @@ class DistributionClass:
         """
         # Predicted Parameters
         predt = predt.reshape(-1, self.n_dist_param, order="F")
+        # print(predt[:5, :])
+        print(f"horizon 0 pred: {predt[0, :]}")
         
         # Replace NaNs and infinity values with unconditional start values
         nan_inf_mask = np.isnan(predt) | np.isinf(predt)
         predt[nan_inf_mask] = np.take(start_values, np.where(nan_inf_mask)[1])
 
+        # Convert to torch.tensor
+        predt_torch = [
+            torch.tensor(predt[:, i].reshape(-1, 1), requires_grad=requires_grad) for i in range(self.n_dist_param)
+        ]
         if self.univariate:
-            # Convert to torch.tensor
-            predt = [
-                torch.tensor(predt[:, i].reshape(-1, 1), requires_grad=requires_grad) for i in range(self.n_dist_param)
+            # Predicted Parameters transformed to response scale
+            predt_transformed = [
+                response_fn(predt_torch[i]) for i, response_fn in enumerate(self.param_dict.values())
             ]
         else:
-            # predt is duplicated n_dim times
-            predt = predt[:predt.shape[0] // self.n_dim]
+            # Reduce predt_torch to size of target
+            predt_torch = [
+                predt_torch[i][:predt.shape[0] // self.n_dim] for i in range(self.n_dist_param)
+            ]
 
             # Convert to torch.tensors
             predt_list = []
             idx = 0
             for n_dim in self.param_dims.values():
-                predt_list.append(torch.tensor(predt[:, idx:idx + n_dim], requires_grad=requires_grad))
+                curr_param = torch.cat([predt_torch[i] for i in range(idx, idx + n_dim)], axis=1)
+                predt_list.append(curr_param)
+                # predt_list.append(torch.tensor(predt[:, idx:idx + n_dim], requires_grad=requires_grad))
                 idx += n_dim
-            predt = predt_list
 
             # Reshape target
             target = target.reshape(self.n_dim, -1).T
 
-        # Predicted Parameters transformed to response scale
-        predt_transformed = [
-            response_fn(predt[i]) for i, response_fn in enumerate(self.param_dict.values())
-        ]
-        
+            # Predicted Parameters transformed to response scale
+            predt_transformed = [
+                response_fn(predt_list[i]) for i, response_fn in enumerate(self.param_dict.values())
+            ]
+
         # Specify Distribution and Loss
         if self.tau is None:
             dist_kwargs = dict(zip(self.distribution_arg_names, predt_transformed))
+            # print(dist_kwargs)
             dist_fit = self.distribution(**dist_kwargs)
+            # print(dist_fit.log_prob(target))
             if self.loss_fn == "nll":
+                # print(dist_fit.log_prob(target))
                 loss = -torch.nansum(dist_fit.log_prob(target))
+                print(f"loss: {loss}")
             elif self.loss_fn == "crps":
                 torch.manual_seed(123)
                 dist_samples = dist_fit.rsample((30,)).squeeze(-1)
@@ -349,7 +362,7 @@ class DistributionClass:
             dist_fit = self.distribution(predt_transformed, self.penalize_crossing)
             loss = -torch.nansum(dist_fit.log_prob(target, self.tau))
 
-        return predt, loss
+        return predt_torch, loss
 
     def draw_samples(self,
                      predt_params: List,
@@ -527,7 +540,15 @@ class DistributionClass:
         if self.loss_fn == "nll":
             # Gradient and Hessian
             grad = autograd(loss, inputs=predt, create_graph=True)
+            gstr = ", ".join(f"{grad[i][0].item():.5f}" for i in range(len(grad)))
+            print(f"grad: {gstr}")
+            # print(f"First horizon par-1: {grad[0][idx,:].mean(axis=0)}")
             hess = [autograd(grad[i].nansum(), inputs=predt[i], retain_graph=True)[0] for i in range(len(grad))]
+            hstr = ", ".join(f"{hess[i][0].item():.5f}" for i in range(len(hess)))
+            print(f"hess: {hstr}")
+            # ratio_str = ", ".join(f"{grad[i][0].item() / hess[i][0].item():.3f}" for i in range(len(hess)))
+            # print(f"ratio: {ratio_str}")
+            print()
         elif self.loss_fn == "crps":
             # Gradient and Hessian
             grad = autograd(loss, inputs=predt, create_graph=True)
