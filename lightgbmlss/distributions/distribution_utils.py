@@ -180,8 +180,6 @@ class DistributionClass:
                 response_fn(params[i].reshape(-1, 1)) for i, response_fn in enumerate(self.param_dict.values())
             ]
         else:
-            param_list = []
-            idx = 0
             # Ensure params is a 2-D tensor
             if isinstance(params, list):
                 params = torch.stack(params)
@@ -189,6 +187,8 @@ class DistributionClass:
                 params = params.reshape(1, -1)
             
             # Extract distribution arguments, which can be multiple parameters
+            param_list = []
+            idx = 0
             for param in self.param_dict:
                 n_dim = self.param_dims[param]
                 param_list.append(self.param_dict[param](params[:, idx:idx + n_dim]))
@@ -303,8 +303,6 @@ class DistributionClass:
         """
         # Predicted Parameters
         predt = predt.reshape(-1, self.n_dist_param, order="F")
-        # print(predt[:5, :])
-        print(f"horizon 0 pred: {predt[0, :]}")
         
         # Replace NaNs and infinity values with unconditional start values
         nan_inf_mask = np.isnan(predt) | np.isinf(predt)
@@ -334,7 +332,7 @@ class DistributionClass:
                 # predt_list.append(torch.tensor(predt[:, idx:idx + n_dim], requires_grad=requires_grad))
                 idx += n_dim
 
-            # Reshape target
+            # Reshape target, imposing order="F"
             target = target.reshape(self.n_dim, -1).T
 
             # Predicted Parameters transformed to response scale
@@ -346,12 +344,11 @@ class DistributionClass:
         if self.tau is None:
             dist_kwargs = dict(zip(self.distribution_arg_names, predt_transformed))
             # print(dist_kwargs)
+            # print(target)
             dist_fit = self.distribution(**dist_kwargs)
-            # print(dist_fit.log_prob(target))
             if self.loss_fn == "nll":
-                # print(dist_fit.log_prob(target))
                 loss = -torch.nansum(dist_fit.log_prob(target))
-                print(f"loss: {loss}")
+                # print(loss)
             elif self.loss_fn == "crps":
                 torch.manual_seed(123)
                 dist_samples = dist_fit.rsample((30,)).squeeze(-1)
@@ -476,8 +473,9 @@ class DistributionClass:
             idx = 0
             for param in self.param_dict:
                 n_dim = self.param_dims[param]
+                response_fn = self.param_dict[param]
                 curr_predt = predt[:, idx:idx + n_dim] + init_score_pred[:, idx:idx + n_dim]
-                dist_params_list.append(self.param_dict[param](curr_predt))
+                dist_params_list.append(response_fn(curr_predt))
                 idx += n_dim
             dist_params_predt = np.concatenate([arr.reshape(arr.shape[0], -1) for arr in dist_params_list], axis=1)
             dist_params_predt = pd.DataFrame(dist_params_predt)
@@ -540,15 +538,7 @@ class DistributionClass:
         if self.loss_fn == "nll":
             # Gradient and Hessian
             grad = autograd(loss, inputs=predt, create_graph=True)
-            gstr = ", ".join(f"{grad[i][0].item():.5f}" for i in range(len(grad)))
-            print(f"grad: {gstr}")
-            # print(f"First horizon par-1: {grad[0][idx,:].mean(axis=0)}")
             hess = [autograd(grad[i].nansum(), inputs=predt[i], retain_graph=True)[0] for i in range(len(grad))]
-            hstr = ", ".join(f"{hess[i][0].item():.5f}" for i in range(len(hess)))
-            print(f"hess: {hstr}")
-            # ratio_str = ", ".join(f"{grad[i][0].item() / hess[i][0].item():.3f}" for i in range(len(hess)))
-            # print(f"ratio: {ratio_str}")
-            print()
         elif self.loss_fn == "crps":
             # Gradient and Hessian
             grad = autograd(loss, inputs=predt, create_graph=True)
