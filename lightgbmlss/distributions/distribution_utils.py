@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from typing import Any, Callable, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
@@ -74,8 +74,6 @@ class DistributionClass:
         self.penalize_crossing = penalize_crossing
         self.param_dims = param_dims
         self.n_dim = n_dim
-        self.grads = []
-        self.hessians = []
 
     def objective_fn(self, predt: np.ndarray, data: lgb.Dataset) -> Tuple[np.ndarray, np.ndarray]:
 
@@ -318,7 +316,7 @@ class DistributionClass:
         """
         # Predicted Parameters
         predt = predt.reshape(-1, self.n_dist_param, order="F")
-        
+
         # Replace NaNs and infinity values with unconditional start values
         nan_inf_mask = np.isnan(predt) | np.isinf(predt)
         predt[nan_inf_mask] = np.take(start_values, np.where(nan_inf_mask)[1])
@@ -588,11 +586,6 @@ class DistributionClass:
         # Reshape
         grad = torch.cat(grad, axis=1).detach().numpy()
         hess = torch.cat(hess, axis=1).detach().numpy()
-
-        self.grads.append(grad)
-        self.hessians.append(hess)
-        if len(self.grads) == 100:
-            pass
 
         # Weighting
         grad *= weights
