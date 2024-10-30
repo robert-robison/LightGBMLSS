@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 
 import lightgbm as lgb
+from lightgbm.basic import LightGBMError
 from lightgbmlss.distributions.distribution_utils import DistributionClass
 from lightgbmlss.logger import CustomLogger
 lgb.register_logger(CustomLogger())
@@ -404,13 +405,18 @@ class LightGBMLSS:
             pruning_callback = LightGBMPruningCallback(trial, self.dist.loss_fn)
             early_stopping_callback = lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)
 
-            lgblss_param_tuning = self.cv(hyper_params,
-                                          train_set,
-                                          num_boost_round=num_boost_round,
-                                          nfold=nfold,
-                                          callbacks=[pruning_callback, early_stopping_callback],
-                                          seed=seed,
-                                          )
+            try:
+                lgblss_param_tuning = self.cv(hyper_params,
+                                            train_set,
+                                            num_boost_round=num_boost_round,
+                                            nfold=nfold,
+                                            callbacks=[pruning_callback, early_stopping_callback],
+                                            seed=seed,
+                                            )
+            except LightGBMError as e:
+                logger.warning(f"Error in hyperparameter tuning: {e}")
+                trial.set_user_attr("opt_round", 0)
+                return np.inf
 
             # Extract the optimal number of boosting rounds
             opt_rounds = np.argmin(np.array(lgblss_param_tuning[f"valid {self.dist.loss_fn}-mean"])) + 1
