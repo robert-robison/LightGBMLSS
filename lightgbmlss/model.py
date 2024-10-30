@@ -26,6 +26,7 @@ from lightgbm.compat import SKLEARN_INSTALLED, _LGBMGroupKFold, _LGBMStratifiedK
 
 import re
 import pickle
+import logging
 
 _LGBM_EvalFunctionResultType = Tuple[str, float, bool]
 _LGBM_BoosterBestScoreType = Dict[str, Dict[str, float]]
@@ -50,6 +51,8 @@ _LGBM_PreprocFunction = Callable[
     Tuple[Dataset, Dataset, Dict[str, Any]]
 ]
 
+
+logger = logging.getLogger(__name__)
 
 class LightGBMLSS:
     """
@@ -266,6 +269,20 @@ class LightGBMLSS:
         self.set_params(params)
         self.set_init_score(train_set)
 
+        if not self.dist.univariate:
+            if folds is not None:
+                logger.warning("Overwriting provided folds to ensure that each data point is in the same fold across dimensions")
+
+            # Assign folds based on data point
+            rng = np.random.default_rng(seed)
+            folds = rng.choice(nfold, size=train_set.get_label().shape[0] // self.dist.n_dim, replace=True)
+
+            # Copy to other dimensions
+            folds = np.tile(folds, self.dist.n_dim)
+
+            # Convert to a list of tuples
+            folds = [(np.where(folds != i)[0], np.where(folds == i)[0]) for i in range(nfold)]
+
         self.bstLSS_cv = lgb.cv(params,
                                 train_set,
                                 feval=self.dist.metric_fn,
@@ -375,6 +392,9 @@ class LightGBMLSS:
                                                        log=param_log
                                                        )
                          })
+                
+                else:
+                    hyper_params.update({param_name: param_value[1]})
 
             # Add booster if not included in dictionary
             if "boosting" not in hyper_params.keys():
@@ -413,17 +433,17 @@ class LightGBMLSS:
             sampler = TPESampler()
 
         pruner = optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=20)
-        study = optuna.create_study(sampler=sampler, pruner=pruner, direction="minimize", study_name=study_name)
-        study.optimize(objective, n_trials=n_trials, timeout=60 * max_minutes, show_progress_bar=True)
+        self.study = optuna.create_study(sampler=sampler, pruner=pruner, direction="minimize", study_name=study_name)
+        self.study.optimize(objective, n_trials=n_trials, timeout=60 * max_minutes, show_progress_bar=True)
 
         print("\nHyper-Parameter Optimization successfully finished.")
-        print("  Number of finished trials: ", len(study.trials))
+        print("  Number of finished trials: ", len(self.study.trials))
         print("  Best trial:")
-        opt_param = study.best_trial
+        opt_param = self.study.best_trial
 
         # Add optimal stopping round
-        opt_param.params["opt_rounds"] = study.trials_dataframe()["user_attrs_opt_round"][
-            study.trials_dataframe()["value"].idxmin()]
+        opt_param.params["opt_rounds"] = self.study.trials_dataframe()["user_attrs_opt_round"][
+            self.study.trials_dataframe()["value"].idxmin()]
         opt_param.params["opt_rounds"] = int(opt_param.params["opt_rounds"])
 
         print("    Value: {}".format(opt_param.value))

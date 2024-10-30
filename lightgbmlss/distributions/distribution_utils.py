@@ -74,6 +74,8 @@ class DistributionClass:
         self.penalize_crossing = penalize_crossing
         self.param_dims = param_dims
         self.n_dim = n_dim
+        self.grads = []
+        self.hessians = []
 
     def objective_fn(self, predt: np.ndarray, data: lgb.Dataset) -> Tuple[np.ndarray, np.ndarray]:
 
@@ -117,8 +119,21 @@ class DistributionClass:
 
         # Duplicate gradients and hessians if not univariate
         if not self.univariate:
-            grad = np.tile(grad, self.n_dim)
-            hess = np.tile(hess, self.n_dim)
+            nobs = target.shape[0] // self.n_dim
+
+            grad_ = np.zeros(nobs * self.n_dim * self.n_dist_param)
+            for i in range(self.n_dist_param):
+                grad_[i * nobs * self.n_dim : (i + 1) * nobs * self.n_dim] = np.tile(
+                    grad[i * nobs : (i + 1) * nobs], self.n_dim
+                )
+            grad = grad_
+
+            hess_ = np.zeros(nobs * self.n_dim * self.n_dist_param)
+            for i in range(self.n_dist_param):
+                hess_[i * nobs * self.n_dim : (i + 1) * nobs * self.n_dim] = np.tile(
+                    hess[i * nobs : (i + 1) * nobs], self.n_dim
+                )
+            hess = hess_
 
         return grad, hess
 
@@ -343,12 +358,9 @@ class DistributionClass:
         # Specify Distribution and Loss
         if self.tau is None:
             dist_kwargs = dict(zip(self.distribution_arg_names, predt_transformed))
-            # print(dist_kwargs)
-            # print(target)
             dist_fit = self.distribution(**dist_kwargs)
             if self.loss_fn == "nll":
                 loss = -torch.nansum(dist_fit.log_prob(target))
-                # print(loss)
             elif self.loss_fn == "crps":
                 torch.manual_seed(123)
                 dist_samples = dist_fit.rsample((30,)).squeeze(-1)
@@ -576,6 +588,11 @@ class DistributionClass:
         # Reshape
         grad = torch.cat(grad, axis=1).detach().numpy()
         hess = torch.cat(hess, axis=1).detach().numpy()
+
+        self.grads.append(grad)
+        self.hessians.append(hess)
+        if len(self.grads) == 100:
+            pass
 
         # Weighting
         grad *= weights

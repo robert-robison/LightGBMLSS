@@ -47,8 +47,8 @@ dtrain = create_mv_dataset(
 )
 
 # Create lightgbm lss model and train
-lgblss = LightGBMLSS(MultivariateGaussian(n_dim=3))
-lgblss.train(params={"learning_rate": 0.1, "num_iterations": 100}, train_set=dtrain)
+lgblss = LightGBMLSS(MultivariateGaussian(n_dim=3, response_fn="exp"))
+lgblss.train(params={"learning_rate": 0.1, "num_iterations": 100, "num_leaves": 4}, train_set=dtrain)
 
 # Make predictions
 preds = lgblss.predict(data[:, 0].reshape(-1, 1))

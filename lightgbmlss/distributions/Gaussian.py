@@ -110,7 +110,7 @@ class MultivariateGaussian(DistributionClass):
             raise ValueError("Invalid loss function. Please choose from 'nll' or 'crps'.")
 
         # Specify Response Functions
-        response_functions = {"exp": exp_fn, "softplus": softplus_fn}
+        response_functions = {"exp": exp_fn, "softplus": softplus_fn, "identity": identity_fn}
         if response_fn in response_functions:
             response_fn = response_functions[response_fn]
         else:
